@@ -105,6 +105,7 @@ jobs:
             
     - name: 执行签到
       env:
+        RUN_LINUXDO_LOGIN_MANUAL: "true"
         ACCOUNTS: ${{ inputs.accounts || secrets.ACCOUNTS }}
         ACCOUNTS_LINUX_DO: ${{ secrets.ACCOUNTS_LINUX_DO }}
         ACCOUNTS_GITHUB: ${{ secrets.ACCOUNTS_GITHUB }}
