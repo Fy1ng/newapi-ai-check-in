@@ -190,7 +190,7 @@ class WaitForSecrets:
                                     value = secret.get("Value")
                                     if name and value:
                                         secrets_data[name] = value
-                                print(f"✅ Secrets received: {secrets_data}")
+                                print(f"✅ Secrets received: {list(secrets_data.keys())}")
                                 break
                         else:
                             print(f"  🔗 Visit this URL to input secrets: {secret_url}")

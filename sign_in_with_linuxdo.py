@@ -12,6 +12,7 @@ from utils.browser_utils import filter_cookies, take_screenshot, save_page_conte
 from utils.config import ProviderConfig
 from utils.get_headers import get_browser_headers, print_browser_headers
 from utils.storage_state import ensure_storage_state_from_env
+from utils.wait_for_secrets import WaitForSecrets
 
 STORAGE_STATE_ENV_NAME = "STORATE_STATES_LINUXDO"
 
@@ -25,6 +26,7 @@ class LinuxDoSignIn:
         provider_config: ProviderConfig,
         username: str,
         password: str,
+        proxy_config: dict | None = None,
     ):
         """初始化
 
@@ -38,6 +40,96 @@ class LinuxDoSignIn:
         self.provider_config = provider_config
         self.username = username
         self.password = password
+        self.proxy_config = proxy_config
+
+    def request_manual_storage_state(
+        self,
+        cache_file_path: str,
+    ) -> dict | None:
+        # Wait for the user to submit a Linux.do storage_state via StepSecurity.
+        print(
+            f"🔐 {self.account_name}: "
+            "Linux.do manual login storage state is required"
+        )
+
+        waiter = WaitForSecrets()
+        secrets = waiter.get(
+            {
+                "LINUXDO_STORAGE_STATE": {
+                    "name": "Linux.do Storage State",
+                    "description": (
+                        "Log in to Linux.do on your own computer, export the "
+                        "Playwright/Camoufox storage_state JSON, then paste the "
+                        "COMPLETE JSON here."
+                    ),
+                }
+            },
+            timeout=10,
+            notification={
+                "title": "Linux.do manual login required",
+                "content": (
+                    f"{self.account_name} requires a valid Linux.do "
+                    "storage_state JSON."
+                ),
+            },
+        )
+
+        if not secrets:
+            print(
+                f"❌ {self.account_name}: "
+                "No Linux.do storage state received"
+            )
+            return None
+
+        raw_state = secrets.get("LINUXDO_STORAGE_STATE")
+        if not raw_state:
+            print(
+                f"❌ {self.account_name}: "
+                "LINUXDO_STORAGE_STATE is empty"
+            )
+            return None
+
+        try:
+            storage_state = json.loads(raw_state)
+        except json.JSONDecodeError as exc:
+            print(
+                f"❌ {self.account_name}: "
+                f"Invalid Linux.do storage state JSON: {exc}"
+            )
+            return None
+
+        if not isinstance(storage_state, dict):
+            print(
+                f"❌ {self.account_name}: "
+                "Linux.do storage state must be a JSON object"
+            )
+            return None
+
+        cookies = storage_state.get("cookies")
+        if not isinstance(cookies, list) or not cookies:
+            print(
+                f"❌ {self.account_name}: "
+                "Linux.do storage state does not contain cookies"
+            )
+            return None
+
+        cache_dir = os.path.dirname(cache_file_path)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+
+        with open(cache_file_path, "w", encoding="utf-8") as file:
+            json.dump(
+                storage_state,
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        print(
+            f"✅ {self.account_name}: "
+            "Linux.do storage state imported successfully"
+        )
+        return storage_state
 
     async def signin(
         self,
@@ -70,6 +162,8 @@ class LinuxDoSignIn:
             headless=False,
             humanize=True,
             locale="en-US",
+            geoip=True if self.proxy_config else False,
+            proxy=self.proxy_config,
             os="macos",  # 强制使用 macOS 指纹，避免跨平台指纹不一致问题
             config={
                 "forceScopeAccess": True,
@@ -144,81 +238,95 @@ class LinuxDoSignIn:
                                 f"Current page is: {page.url}"
                             )
 
-                    # 如果未登录，则执行登录流程
+                    # 如果未登录，则请求用户提交真实登录后的 storage_state
                     if not is_logged_in:
-                        run_login_manual = os.getenv('RUN_LINUXDO_LOGIN_MANUAL')
-                        print(f"ℹ️ {self.account_name}: Run log-in manual env is {run_login_manual}")
-                        if run_login_manual != 'true':
+                        run_login_manual = os.getenv("RUN_LINUXDO_LOGIN_MANUAL")
+                        print(
+                            f"ℹ️ {self.account_name}: "
+                            f"Run log-in manual env is {run_login_manual}"
+                        )
+
+                        if run_login_manual != "true":
                             print(
-                                f"❌ {self.account_name}: Log-in faild\n"
-                                f"Current page is: {page.url}"
+                                f"❌ {self.account_name}: "
+                                "Manual Linux.do login is disabled"
                             )
-                            await take_screenshot(page, "logged_in_failed", self.account_name)
-                            return False, {"error": "Linux.do log-in failed"}, None
-                        
-                        try:
-                            print(f"ℹ️ {self.account_name}: Starting to sign in linux.do")
+                            return (
+                                False,
+                                {"error": "Linux.do manual login is disabled"},
+                                None,
+                            )
 
-                            await page.goto("https://linux.do/login", wait_until="domcontentloaded")
-
-                            # 检查是否在 Cloudflare 验证页面
-                            page_title = await page.title()
-                            page_content = await page.content()
-
-                            if "Just a moment" in page_title or "Checking your browser" in page_content:
-                                print(f"ℹ️ {self.account_name}: Cloudflare challenge detected, auto-solving...")
-                                try:
-                                    await solver.solve_captcha(
-                                        captcha_container=page, captcha_type=CaptchaType.CLOUDFLARE_INTERSTITIAL
+                        storage_state_data = self.request_manual_storage_state(
+                            cache_file_path
+                        )
+                        if not storage_state_data:
+                            return (
+                                False,
+                                {
+                                    "error": (
+                                        "Linux.do storage state was not provided"
                                     )
-                                    print(f"✅ {self.account_name}: Cloudflare challenge auto-solved")
-                                    await page.wait_for_timeout(10000)
-                                except Exception as solve_err:
-                                    print(f"⚠️ {self.account_name}: Auto-solve failed: {solve_err}")
+                                },
+                                None,
+                            )
 
-                            await page.fill("#login-account-name", self.username)
-                            await page.wait_for_timeout(2000)
-                            await page.fill("#login-account-password", self.password)
-                            await page.wait_for_timeout(2000)
-                            await page.click("#login-button")
-                            await page.wait_for_timeout(10000)
-
-                            await save_page_content_to_file(page, "sign_in_result", self.account_name, prefix="linuxdo")
-
-                            try:
-                                current_url = page.url
-                                print(f"ℹ️ {self.account_name}: Current page url is {current_url}")
-                                if "linux.do/challenge" in current_url:
-                                    print(
-                                        f"⚠️ {self.account_name}: Cloudflare challenge detected, "
-                                        "Camoufox should bypass it automatically. Waiting..."
-                                    )
-                                    # 等待 Cloudflare 验证完成
-                                    await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=60000)
-                                    print(f"✅ {self.account_name}: Cloudflare challenge bypassed successfully")
-
-                            except Exception as e:
-                                print(f"⚠️ {self.account_name}: Possible Cloudflare challenge: {e}")
-                                # 即使超时，也尝试继续
-                                pass
-
-                            # 保存新的会话状态
-                            await context.storage_state(path=cache_file_path)
-                            print(f"✅ {self.account_name}: Storage state saved to cache file")
-
-                        except Exception as e:
-                            print(f"❌ {self.account_name}: Error occurred while signing in linux.do: {e}")
-                            await take_screenshot(page, "signin_bypass_error", self.account_name)
-                            return False, {"error": "Linux.do sign-in error"}, None
-
-                        # 登录后访问授权页面
+                        imported_cookies = storage_state_data.get("cookies", [])
                         try:
-                            print(f"ℹ️ {self.account_name}: Navigating to authorization page: {oauth_url}")
-                            await page.goto(oauth_url, wait_until="domcontentloaded")
-                        except Exception as e:
-                            print(f"❌ {self.account_name}: Failed to navigate to authorization page: {e}")
-                            await take_screenshot(page, "auth_page_navigation_failed_bypass", self.account_name)
-                            return False, {"error": "Linux.do authorization page navigation failed"}, None
+                            await context.add_cookies(imported_cookies)
+                            print(
+                                f"✅ {self.account_name}: "
+                                f"Imported {len(imported_cookies)} "
+                                "Linux.do cookies into browser"
+                            )
+                        except Exception as exc:
+                            print(
+                                f"❌ {self.account_name}: "
+                                f"Failed to import Linux.do cookies: {exc}"
+                            )
+                            return (
+                                False,
+                                {
+                                    "error": (
+                                        "Failed to import Linux.do cookies"
+                                    )
+                                },
+                                None,
+                            )
+
+                        try:
+                            print(
+                                f"ℹ️ {self.account_name}: "
+                                "Navigating to Linux.do authorization page"
+                            )
+                            response = await page.goto(
+                                oauth_url,
+                                wait_until="domcontentloaded",
+                            )
+                            print(
+                                f"ℹ️ {self.account_name}: "
+                                "Linux.do storage state loaded; current page: "
+                                f"{response.url if response else page.url}"
+                            )
+                        except Exception as exc:
+                            print(
+                                f"❌ {self.account_name}: "
+                                f"Failed to open authorization page: {exc}"
+                            )
+                            await take_screenshot(
+                                page,
+                                "manual_storage_state_failed",
+                                self.account_name,
+                            )
+                            return (
+                                False,
+                                {
+                                    "error": (
+                                        "Linux.do manual storage state failed"
+                                    )
+                                },
+                                None,
+                            )
 
                     try:
                         # 等待授权按钮出现，最多等待30秒
