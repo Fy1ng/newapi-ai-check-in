@@ -1546,7 +1546,7 @@ class CheckIn:
             print(f"ℹ️ {self.account_name}: Extracted {len(user_cookies)} site login cookies: {list(user_cookies.keys())}")
 
             merged_cookies = {**bypass_cookies, **user_cookies}
-            return await self.check_in_with_cookies(merged_cookies, common_headers, api_user, impersonate)
+            return await self.check_in_with_cookies(merged_cookies, common_headers, api_user)
 
         except Exception as e:
             print(f"❌ {self.account_name}: Error occurred during site login process - {e}")
